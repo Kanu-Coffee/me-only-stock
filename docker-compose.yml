@@ -6,6 +6,13 @@ services:
     container_name: me-only-stock
     ports:
       - "4000:4000"
-    env_file:
-      - .env
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      KIWOOM_BASE_URL: https://api.kiwoom.com
+      KIWOOM_APPKEY: "REPLACE_WITH_APPKEY"
+      KIWOOM_SECRETKEY: "REPLACE_WITH_SECRETKEY"
+      KIWOOM_ACCOUNT: "REPLACE_WITH_ACCOUNT"
+      USER_ID: "REPLACE_WITH_APP_USER_ID"
+      USER_PW: "REPLACE_WITH_APP_USER_PW"
     restart: unless-stopped

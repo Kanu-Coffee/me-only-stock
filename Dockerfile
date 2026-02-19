@@ -10,7 +10,7 @@ WORKDIR /app
 COPY server/package*.json ./server/
 RUN npm --prefix server install
 COPY server ./server
+COPY server.js ./server.js
 COPY --from=client-builder /app/client/dist ./public
-COPY .env.example ./.env.example
 EXPOSE 4000
-CMD ["node", "server/index.js"]
+CMD ["node", "server.js"]

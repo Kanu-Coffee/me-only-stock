@@ -1,50 +1,71 @@
-const KIWOOM_BASE_URL = process.env.KIWOOM_BASE_URL || 'https://api.kiwoom.com';
+import axios from 'axios';
+
+const isProd = process.env.NODE_ENV === 'production';
+const KIWOOM_BASE_URL = process.env.KIWOOM_BASE_URL || (isProd ? 'https://api.kiwoom.com' : 'https://api.kiwoom.com');
+
+const APP_KEY = process.env.KIWOOM_APPKEY || process.env.KIWOOM_APP_KEY;
+const SECRET_KEY = process.env.KIWOOM_SECRETKEY || process.env.KIWOOM_SECRET_KEY;
+const ACCOUNT_NO = process.env.KIWOOM_ACCOUNT;
+
+let cachedToken = null;
+let cachedExpireAt = 0;
+
+function validateLiveMode() {
+  if (!APP_KEY || !SECRET_KEY || !ACCOUNT_NO) {
+    throw new Error('실전 모드 환경변수 누락: KIWOOM_APPKEY, KIWOOM_SECRETKEY, KIWOOM_ACCOUNT 를 확인하세요.');
+  }
+}
 
 async function requestToken() {
-  const appKey = process.env.KIWOOM_APP_KEY;
-  const secret = process.env.KIWOOM_SECRET_KEY;
+  const now = Date.now();
+  if (cachedToken && cachedExpireAt > now + 60_000) {
+    return cachedToken;
+  }
 
-  if (!appKey || !secret) return null;
+  validateLiveMode();
 
-  const response = await fetch(`${KIWOOM_BASE_URL}/oauth2/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ grant_type: 'client_credentials', appkey: appKey, secretkey: secret })
-  });
+  const response = await axios.post(
+    `${KIWOOM_BASE_URL}/oauth2/token`,
+    {
+      grant_type: 'client_credentials',
+      appkey: APP_KEY,
+      secretkey: SECRET_KEY
+    },
+    { headers: { 'Content-Type': 'application/json', 'api-id': 'au10001' } }
+  );
 
-  if (!response.ok) return null;
-  return response.json();
+  const token = response.data?.token || response.data?.access_token;
+  const expiresIn = Number(response.data?.expires_in || 3600);
+
+  if (!token) {
+    throw new Error('키움 토큰 발급 실패: 응답에 토큰이 없습니다.');
+  }
+
+  cachedToken = token;
+  cachedExpireAt = now + expiresIn * 1000;
+  return token;
 }
 
 export async function getPortfolio() {
   const token = await requestToken();
 
-  if (!token?.token) {
-    return {
-      summary: { totalAsset: 12540000, totalReturnRate: 3.91 },
-      items: [
-        { code: '005930', name: '삼성전자', returnRate: 4.2, evalProfitLoss: 82000, qty: 14, avgPrice: 70500 },
-        { code: '035420', name: 'NAVER', returnRate: -2.1, evalProfitLoss: -36000, qty: 5, avgPrice: 215000 }
-      ],
-      source: 'mock'
-    };
-  }
-
-  const response = await fetch(`${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token.token}`,
-      'Content-Type': 'application/json',
-      'api-id': 'ka01690'
+  const response = await axios.post(
+    `${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance`,
+    {
+      account_no: ACCOUNT_NO,
+      cont_yn: 'N',
+      next_key: ''
     },
-    body: JSON.stringify({ cont_yn: 'N', next_key: '' })
-  });
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'api-id': 'ka01690'
+      }
+    }
+  );
 
-  if (!response.ok) {
-    throw new Error('키움 잔고 조회 실패');
-  }
-
-  const data = await response.json();
+  const data = response.data || {};
 
   return {
     summary: {
@@ -59,38 +80,31 @@ export async function getPortfolio() {
       qty: row.hldg_qty,
       avgPrice: row.pchs_avg_pric
     })),
-    source: 'kiwoom'
+    source: 'kiwoom-live'
   };
 }
 
 export async function placeOrder({ symbol, qty, side }) {
   const token = await requestToken();
 
-  if (!token?.token) {
-    return {
-      message: `[모의] ${symbol} ${qty}주 ${side === 'buy' ? '매수' : '매도'} 주문이 접수되었습니다.`
-    };
-  }
-
-  const response = await fetch(`${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token.token}`,
-      'Content-Type': 'application/json',
-      'api-id': 'kt10000'
-    },
-    body: JSON.stringify({
+  const response = await axios.post(
+    `${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash`,
+    {
+      account_no: ACCOUNT_NO,
       pdno: symbol,
       ord_dvsn: '01',
       ord_qty: String(qty),
       trde_tp: side === 'buy' ? '2' : '1'
-    })
-  });
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'api-id': 'kt10000'
+      }
+    }
+  );
 
-  if (!response.ok) {
-    throw new Error('키움 주문 실패');
-  }
-
-  const data = await response.json();
+  const data = response.data || {};
   return { message: data?.msg1 || '주문 요청 완료', raw: data };
 }
