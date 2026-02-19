@@ -1,0 +1,11 @@
+services:
+  me-only-stock:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: me-only-stock
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    restart: unless-stopped
