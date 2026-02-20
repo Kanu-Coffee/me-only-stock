@@ -1,11 +1,14 @@
 const ACCOUNT_STORAGE_KEY = 'me-only-stock:selected-account';
 const RECENT_SYMBOLS_KEY = 'me-only-stock:recent-symbols';
 const RECENT_SEARCHES_KEY = 'me-only-stock:recent-searches';
+const AUTH_TOKEN_KEY = 'me-only-stock:access-token';
+const AUTH_USER_ID_KEY = 'me-only-stock:user-id';
 
 const state = {
   tab: 'home',
-  isLoggedIn: false,
-  auth: { id: '', password: '' },
+  isLoggedIn: Boolean(localStorage.getItem(AUTH_TOKEN_KEY)),
+  authToken: localStorage.getItem(AUTH_TOKEN_KEY) || '',
+  auth: { id: localStorage.getItem(AUTH_USER_ID_KEY) || '', password: '' },
   accounts: [],
   selectedAccountNo: localStorage.getItem(ACCOUNT_STORAGE_KEY) || '',
   balance: { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] },
@@ -34,7 +37,7 @@ ui.tabs.forEach((button) => {
   button.addEventListener('click', () => {
     state.tab = button.dataset.tab;
     render();
-    if (state.tab === 'balance') {
+    if (state.tab === 'balance' && state.isLoggedIn) {
       loadAccounts().then(loadBalance);
     }
   });
@@ -75,6 +78,45 @@ function saveSelectedAccount(accountNo) {
   localStorage.setItem(ACCOUNT_STORAGE_KEY, accountNo);
 }
 
+function logoutToHome() {
+  state.isLoggedIn = false;
+  state.authToken = '';
+  state.accounts = [];
+  state.selectedAccountNo = '';
+  state.balance = { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] };
+  state.quote = null;
+  state.selectedStock = null;
+  state.tab = 'home';
+
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(ACCOUNT_STORAGE_KEY);
+
+  setStatus('로그인이 필요합니다.');
+  render();
+}
+
+async function authFetch(url, options = {}) {
+  const headers = {
+    ...(options.headers || {})
+  };
+
+  if (state.authToken) {
+    headers.Authorization = `Bearer ${state.authToken}`;
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers
+  });
+
+  if (response.status === 401) {
+    logoutToHome();
+    throw new Error('UNAUTHORIZED');
+  }
+
+  return response;
+}
+
 function render() {
   setTabActive();
 
@@ -108,12 +150,17 @@ async function login() {
     });
     const json = await response.json();
 
-    if (!response.ok || !json.ok) {
+    if (!response.ok || !json.ok || !json.accessToken) {
       showAlert(json.message || '로그인 실패');
       return;
     }
 
     state.isLoggedIn = true;
+    state.authToken = json.accessToken;
+
+    localStorage.setItem(AUTH_TOKEN_KEY, json.accessToken);
+    localStorage.setItem(AUTH_USER_ID_KEY, json.user.id);
+
     setStatus(`${json.user.id} 님 로그인됨`);
     state.tab = 'balance';
     render();
@@ -195,9 +242,11 @@ function renderBalance() {
 
 async function loadAccounts() {
   if (!state.isLoggedIn) return;
+
   try {
-    const response = await fetch('/api/accounts');
+    const response = await authFetch('/api/accounts');
     const json = await response.json();
+
     if (!response.ok || !json.ok) {
       showAlert(json.message || '계좌 목록을 불러오지 못했습니다.');
       return;
@@ -213,8 +262,10 @@ async function loadAccounts() {
     if (state.tab === 'balance') {
       renderBalance();
     }
-  } catch {
-    showAlert('계좌 목록을 불러오지 못했습니다.');
+  } catch (error) {
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('계좌 목록을 불러오지 못했습니다.');
+    }
   }
 }
 
@@ -231,7 +282,7 @@ async function loadBalance() {
   }
 
   try {
-    const response = await fetch(`/api/balance?accountNo=${encodeURIComponent(state.selectedAccountNo)}`);
+    const response = await authFetch(`/api/balance?accountNo=${encodeURIComponent(state.selectedAccountNo)}`);
     const json = await response.json();
 
     if (!response.ok || !json.ok) {
@@ -247,10 +298,13 @@ async function loadBalance() {
     };
 
     if (state.tab === 'balance') renderBalance();
-  } catch {
+  } catch (error) {
     state.balance = { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] };
     if (state.tab === 'balance') renderBalance();
-    showAlert('데이터를 불러올 수 없습니다');
+
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('데이터를 불러올 수 없습니다');
+    }
   }
 }
 
@@ -459,13 +513,15 @@ async function searchSymbols() {
   renderOrder();
 
   try {
-    const response = await fetch(`/api/symbols?query=${encodeURIComponent(query)}`);
+    const response = await authFetch(`/api/symbols?query=${encodeURIComponent(query)}`);
     const items = await response.json();
     state.modal.items = Array.isArray(items) ? items : [];
     persistRecentSearches(query);
-  } catch {
+  } catch (error) {
     state.modal.items = [];
-    state.modal.error = '검색에 실패했습니다.';
+    if (error.message !== 'UNAUTHORIZED') {
+      state.modal.error = '검색에 실패했습니다.';
+    }
   } finally {
     state.modal.loading = false;
     renderOrder();
@@ -474,7 +530,7 @@ async function searchSymbols() {
 
 async function loadQuote(code) {
   try {
-    const response = await fetch(`/api/quote?code=${encodeURIComponent(code)}`);
+    const response = await authFetch(`/api/quote?code=${encodeURIComponent(code)}`);
     const json = await response.json();
 
     if (!response.ok || !json.ok) {
@@ -484,8 +540,10 @@ async function loadQuote(code) {
 
     state.quote = json.quote;
     renderOrder();
-  } catch {
-    showAlert('시세를 불러올 수 없습니다.');
+  } catch (error) {
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('시세를 불러올 수 없습니다.');
+    }
   }
 }
 
@@ -507,7 +565,7 @@ async function placeOrder() {
   }
 
   try {
-    const response = await fetch('/api/order', {
+    const response = await authFetch('/api/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol, qty: state.qty, side: state.side, accountNo: state.selectedAccountNo })
@@ -520,9 +578,18 @@ async function placeOrder() {
     }
 
     showAlert(json.message || '주문 요청 완료');
-  } catch {
-    showAlert('주문 요청에 실패했습니다.');
+  } catch (error) {
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('주문 요청에 실패했습니다.');
+    }
   }
 }
 
 render();
+
+if (state.isLoggedIn) {
+  setStatus('자동 로그인 상태입니다.');
+  state.tab = 'balance';
+  render();
+  loadAccounts().then(loadBalance);
+}

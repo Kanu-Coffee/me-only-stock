@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import axios from 'axios';
+import jwt from 'jsonwebtoken';
 import { parseKiwoomExpiresDt, shouldReuseToken } from './server/kiwoom/tokenManager.js';
 
 dotenv.config();
@@ -10,8 +11,7 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT || 3259);
 const KIWOOM_BASE_URL = process.env.KIWOOM_BASE_URL || 'https://api.kiwoom.com';
-const KIWOOM_APPKEY = process.env.KIWOOM_APPKEY;
-const KIWOOM_SECRETKEY = process.env.KIWOOM_SECRETKEY;
+const JWT_SECRET = process.env.JWT_SECRET || '';
 
 const STOCK_MASTER = [
   { code: '005930', name: '삼성전자', market: 'KOSPI' },
@@ -26,11 +26,11 @@ const STOCK_MASTER = [
   { code: '091990', name: '셀트리온헬스케어', market: 'KOSDAQ' }
 ];
 
-const tokenCache = {
-  token: null,
-  expiresAtMs: 0,
-  inFlightPromise: null
-};
+const tokenCacheByUser = new Map();
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.resolve('public')));
 
 app.use(cors());
 app.use(express.json());
@@ -53,7 +53,10 @@ function getLoginUsers() {
           if (user?.id && user?.password) {
             users.push({
               id: String(user.id),
-              password: String(user.password)
+              password: String(user.password),
+              appkey: String(user.appkey || user.appKey || ''),
+              secretkey: String(user.secretkey || user.secretKey || ''),
+              account: String(user.account || user.accountNo || '')
             });
           }
         });
@@ -66,25 +69,73 @@ function getLoginUsers() {
   for (let i = 1; i <= 20; i += 1) {
     const id = process.env[`APP_USER_${i}_ID`];
     const password = process.env[`APP_USER_${i}_PW`];
-    if (id && password) users.push({ id, password });
+    if (!id || !password) continue;
+
+    users.push({
+      id,
+      password,
+      appkey: process.env[`APP_USER_${i}_APPKEY`] || '',
+      secretkey: process.env[`APP_USER_${i}_SECRETKEY`] || '',
+      account: process.env[`APP_USER_${i}_ACCOUNT`] || ''
+    });
   }
 
   if (process.env.USER_ID && process.env.USER_PW) {
-    users.push({ id: process.env.USER_ID, password: process.env.USER_PW });
+    users.push({
+      id: process.env.USER_ID,
+      password: process.env.USER_PW,
+      appkey: process.env.KIWOOM_APPKEY || '',
+      secretkey: process.env.KIWOOM_SECRETKEY || '',
+      account: process.env.KIWOOM_ACCOUNT || ''
+    });
   }
 
   return users;
 }
 
-async function issueToken() {
-  ensureKiwoomEnv();
+function getUserById(userId) {
+  return getLoginUsers().find((user) => user.id === userId) || null;
+}
+
+function resolveKiwoomCreds(userId) {
+  const user = getUserById(userId);
+  if (!user) throw new Error('사용자를 찾을 수 없습니다.');
+
+  const appkey = user.appkey || process.env.KIWOOM_APPKEY || '';
+  const secretkey = user.secretkey || process.env.KIWOOM_SECRETKEY || '';
+
+  if (!appkey || !secretkey) {
+    throw new Error('사용자 Kiwoom 키가 설정되지 않았습니다.');
+  }
+
+  return {
+    appkey,
+    secretkey,
+    defaultAccount: user.account || process.env.KIWOOM_ACCOUNT || ''
+  };
+}
+
+function getTokenCache(userId) {
+  if (!tokenCacheByUser.has(userId)) {
+    tokenCacheByUser.set(userId, {
+      token: null,
+      expiresAtMs: 0,
+      inFlightPromise: null
+    });
+  }
+
+  return tokenCacheByUser.get(userId);
+}
+
+async function issueToken(userId) {
+  const { appkey, secretkey } = resolveKiwoomCreds(userId);
 
   const response = await axios.post(
     `${KIWOOM_BASE_URL}/oauth2/token`,
     {
       granttype: 'clientcredentials',
-      appkey: KIWOOM_APPKEY,
-      secretkey: KIWOOM_SECRETKEY
+      appkey,
+      secretkey
     },
     {
       headers: {
@@ -102,27 +153,30 @@ async function issueToken() {
     throw new Error('Kiwoom 토큰 발급 실패: token이 없습니다.');
   }
 
-  tokenCache.token = token;
-  tokenCache.expiresAtMs = expiresAtMs || Date.now() + 50 * 60 * 1000;
+  const cache = getTokenCache(userId);
+  cache.token = token;
+  cache.expiresAtMs = expiresAtMs || Date.now() + 50 * 60 * 1000;
 
   return token;
 }
 
-async function getAccessToken(forceRefresh = false) {
+async function getAccessToken(userId, forceRefresh = false) {
+  const cache = getTokenCache(userId);
   const now = Date.now();
-  if (!forceRefresh && shouldReuseToken(tokenCache, now)) {
-    return tokenCache.token;
+
+  if (!forceRefresh && shouldReuseToken(cache, now)) {
+    return cache.token;
   }
 
-  if (!forceRefresh && tokenCache.inFlightPromise) {
-    return tokenCache.inFlightPromise;
+  if (!forceRefresh && cache.inFlightPromise) {
+    return cache.inFlightPromise;
   }
 
-  tokenCache.inFlightPromise = issueToken().finally(() => {
-    tokenCache.inFlightPromise = null;
+  cache.inFlightPromise = issueToken(userId).finally(() => {
+    cache.inFlightPromise = null;
   });
 
-  return tokenCache.inFlightPromise;
+  return cache.inFlightPromise;
 }
 
 function isAuthError(error) {
@@ -134,9 +188,9 @@ function isAuthError(error) {
   return code.includes('auth') || msg.includes('token') || msg.includes('인증');
 }
 
-async function callKiwoom(config, retryOnAuthError = true) {
+async function callKiwoom(userId, config, retryOnAuthError = true) {
   try {
-    const token = await getAccessToken(false);
+    const token = await getAccessToken(userId, false);
     const response = await axios({
       ...config,
       baseURL: KIWOOM_BASE_URL,
@@ -147,11 +201,12 @@ async function callKiwoom(config, retryOnAuthError = true) {
         Authorization: `Bearer ${token}`
       }
     });
+
     return response;
   } catch (error) {
     if (retryOnAuthError && isAuthError(error)) {
-      await getAccessToken(true);
-      return callKiwoom(config, false);
+      await getAccessToken(userId, true);
+      return callKiwoom(userId, config, false);
     }
     throw error;
   }
@@ -179,6 +234,40 @@ function normalizeBalancePayload(raw) {
   };
 }
 
+function createJwt(userId) {
+  if (!JWT_SECRET) {
+    throw new Error('JWT_SECRET 환경변수를 설정하세요.');
+  }
+
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '12h' });
+}
+
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const [type, token] = authHeader.split(' ');
+
+  if (type !== 'Bearer' || !token) {
+    return res.status(401).json({ ok: false, message: '인증이 필요합니다.' });
+  }
+
+  if (!JWT_SECRET) {
+    return res.status(500).json({ ok: false, message: '서버 인증 설정이 누락되었습니다.' });
+  }
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.userId = String(payload.userId || '');
+
+    if (!req.userId) {
+      return res.status(401).json({ ok: false, message: '인증이 유효하지 않습니다.' });
+    }
+
+    return next();
+  } catch {
+    return res.status(401).json({ ok: false, message: '인증이 만료되었거나 유효하지 않습니다.' });
+  }
+}
+
 app.post('/api/auth/login', (req, res) => {
   try {
     const { id, password } = req.body || {};
@@ -197,10 +286,21 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(401).json({ ok: false, message: '로그인 정보가 올바르지 않습니다.' });
     }
 
-    return res.json({ ok: true, user: { id: found.id } });
+    resolveKiwoomCreds(found.id);
+
+    const accessToken = createJwt(found.id);
+
+    return res.json({ ok: true, user: { id: found.id }, accessToken });
   } catch (error) {
     return res.status(500).json({ ok: false, message: error.message || '로그인 처리 실패' });
   }
+});
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth/login') {
+    return next();
+  }
+  return requireAuth(req, res, next);
 });
 
 app.get('/api/symbols', (req, res) => {
@@ -217,7 +317,9 @@ app.get('/api/symbols', (req, res) => {
 
 app.get('/api/accounts', async (req, res) => {
   try {
-    const response = await callKiwoom({
+    const { defaultAccount } = resolveKiwoomCreds(req.userId);
+
+    const response = await callKiwoom(req.userId, {
       method: 'POST',
       url: '/api/dostk/acnt',
       headers: { 'api-id': 'ka00001' },
@@ -239,15 +341,21 @@ app.get('/api/accounts', async (req, res) => {
       });
     });
 
-    if (!list.length && process.env.KIWOOM_ACCOUNT) {
-      list.push({ accountNo: process.env.KIWOOM_ACCOUNT, broker: '키움증권' });
+    if (!list.length && defaultAccount) {
+      list.push({ accountNo: defaultAccount, broker: '키움증권' });
     }
 
     return res.json({ ok: true, accounts: list });
-  } catch (error) {
-    if (process.env.KIWOOM_ACCOUNT) {
-      return res.json({ ok: true, accounts: [{ accountNo: process.env.KIWOOM_ACCOUNT, broker: '키움증권' }] });
+  } catch {
+    try {
+      const { defaultAccount } = resolveKiwoomCreds(req.userId);
+      if (defaultAccount) {
+        return res.json({ ok: true, accounts: [{ accountNo: defaultAccount, broker: '키움증권' }] });
+      }
+    } catch {
+      // noop
     }
+
     return res.status(502).json({ ok: false, message: '계좌 목록을 불러오지 못했습니다.', accounts: [] });
   }
 });
@@ -257,7 +365,7 @@ app.get('/api/quote', async (req, res) => {
     const code = String(req.query.code || '').trim();
     if (!code) return res.status(400).json({ ok: false, message: '종목코드가 필요합니다.' });
 
-    const response = await callKiwoom({
+    const response = await callKiwoom(req.userId, {
       method: 'GET',
       url: '/uapi/domestic-stock/v1/quotations/inquire-price',
       headers: { 'api-id': 'ka10002' },
@@ -293,7 +401,7 @@ app.get('/api/balance', async (req, res) => {
       return res.status(400).json({ ok: false, message: '계좌번호를 선택하세요.', summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] });
     }
 
-    const response = await callKiwoom({
+    const response = await callKiwoom(req.userId, {
       method: 'POST',
       url: '/uapi/domestic-stock/v1/trading/inquire-balance',
       headers: { 'api-id': 'ka01690' },
@@ -324,7 +432,7 @@ app.post('/api/order', async (req, res) => {
       return res.status(400).json({ ok: false, message: '주문 파라미터가 부족합니다.' });
     }
 
-    const response = await callKiwoom({
+    const response = await callKiwoom(req.userId, {
       method: 'POST',
       url: '/uapi/domestic-stock/v1/trading/order-cash',
       headers: { 'api-id': 'kt10000' },

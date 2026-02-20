@@ -2,8 +2,8 @@
 
 ## 개요
 - `server.js` + `public/` 정적 파일 기반으로 동작하는 모바일 주식 주문 웹앱입니다.
-- Kiwoom 인증/호출은 **서버에서만** 수행하며, 프론트는 `/api/*` 엔드포인트만 호출합니다.
-- 기본 포트는 `3259`이며 Docker Compose에서 외부 포트를 변경할 수 있습니다.
+- Kiwoom 인증/호출은 **서버에서만** 수행합니다.
+- JWT 인증(12시간)을 사용하며 `/api/*`는 로그인 후 Bearer 토큰이 필요합니다.
 
 ## 실행
 ```bash
@@ -14,53 +14,52 @@ npm start
 
 ## Docker Compose 사용법
 ```bash
-cp .env.example .env
+# Portainer처럼 .env 없이도 환경변수만 주입 가능
 docker compose up -d --build
 ```
 
-### 포트 변경
-- 내부 포트: `PORT`
-- 외부 포트: `HOST_PORT`
-- 예) 외부 9001 사용
-```env
-PORT=3259
-HOST_PORT=9001
-```
-
 ## 환경변수
-### Kiwoom REST (필수)
+### 필수
 - `KIWOOM_BASE_URL` (기본: `https://api.kiwoom.com`)
-- `KIWOOM_APPKEY`
-- `KIWOOM_SECRETKEY`
+- `JWT_SECRET` (JWT 서명용)
 
-> 보안 정책: API 키/시크릿/토큰은 프론트로 내려가지 않으며, 브라우저 저장소에 저장되지 않습니다.
+### 멀티유저(권장)
+각 앱 사용자마다 Kiwoom 키를 따로 설정합니다.
+- `APP_USER_1_ID`, `APP_USER_1_PW`, `APP_USER_1_APPKEY`, `APP_USER_1_SECRETKEY`, `APP_USER_1_ACCOUNT`
+- `APP_USER_2_ID`, `APP_USER_2_PW`, `APP_USER_2_APPKEY`, `APP_USER_2_SECRETKEY`, `APP_USER_2_ACCOUNT`
+- ...
 
-### 앱 로그인
-- 단일: `USER_ID`, `USER_PW`
-- 다중: `APP_USER_1_ID`, `APP_USER_1_PW` ... 또는 `APP_USERS_JSON`
-
-예시:
+또는 `APP_USERS_JSON` 사용:
 ```env
-APP_USERS_JSON=[{"id":"alice","password":"alice-pass"},{"id":"bob","password":"bob-pass"}]
+APP_USERS_JSON=[
+  {"id":"alice","password":"alice-pass","appkey":"alice-appkey","secretkey":"alice-secret","account":"111122223333"},
+  {"id":"bob","password":"bob-pass","appkey":"bob-appkey","secretkey":"bob-secret","account":"444455556666"}
+]
 ```
+
+### 단일유저 fallback
+- `USER_ID`, `USER_PW`
+- `KIWOOM_APPKEY`, `KIWOOM_SECRETKEY`, `KIWOOM_ACCOUNT`
+
+## 보안 원칙
+- appkey/secretkey/Kiwoom access token은 클라이언트로 내려가지 않습니다.
+- JWT payload는 `userId`만 포함합니다.
+- API 응답/로그에 Kiwoom 키나 토큰을 출력하지 않습니다.
 
 ## 주요 API
-- `POST /api/auth/login` 로그인
-- `GET /api/accounts` 계좌 목록 조회 (ka00001 기반)
-- `GET /api/symbols?query=삼성` 종목 검색 (종목명 기반)
-- `GET /api/quote?code=005930` 현재가/등락률 (ka10002)
-- `GET /api/balance?accountNo=12345678` 잔고 조회 (ka01690)
+- `POST /api/auth/login` 로그인 + JWT 발급
+- `GET /api/accounts` 계좌 목록 조회 (ka00001)
+- `GET /api/symbols?query=삼성` 종목 검색
+- `GET /api/quote?code=005930` 현재가 (ka10002)
+- `GET /api/balance?accountNo=...` 잔고 조회 (ka01690)
 - `POST /api/order` 주문 (kt10000)
 
-## UX 변경 사항
-- 홈 로그인 화면에서 API Key 입력을 제거했습니다.
-- 주문 탭은 **종목 검색 모달**(입력 + 검색 버튼/엔터 + 결과 선택) 방식입니다.
-- 사용자에게는 종목명 중심 UI를 제공하고 내부적으로만 종목코드를 사용합니다.
-- 잔고 탭 상단에서 계좌번호(및 증권사 라벨)를 선택할 수 있습니다.
-- 마지막 선택 계좌/최근 검색어/최근 선택 종목은 로컬 저장소에 저장됩니다.
+## 프론트 동작
+- JWT를 localStorage에 저장하고, 모든 API 요청에 Bearer 헤더를 자동 추가합니다.
+- API가 401을 반환하면 자동 로그아웃 후 홈(로그인)으로 이동합니다.
 
 ## 테스트
 ```bash
 npm test
+node --check server.js && node --check public/app.js
 ```
-- `server/kiwoom/tokenManager.test.js`에서 토큰 만료 파싱/캐시 재사용 로직을 검증합니다.
