@@ -3,16 +3,15 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import axios from 'axios';
+import { parseKiwoomExpiresDt, shouldReuseToken } from './server/kiwoom/tokenManager.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 3259);
 const KIWOOM_BASE_URL = process.env.KIWOOM_BASE_URL || 'https://api.kiwoom.com';
-
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.resolve('public')));
+const KIWOOM_APPKEY = process.env.KIWOOM_APPKEY;
+const KIWOOM_SECRETKEY = process.env.KIWOOM_SECRETKEY;
 
 const STOCK_MASTER = [
   { code: '005930', name: '삼성전자', market: 'KOSPI' },
@@ -28,9 +27,20 @@ const STOCK_MASTER = [
 ];
 
 const tokenCache = {
-  value: null,
-  expiresAt: 0
+  token: null,
+  expiresAtMs: 0,
+  inFlightPromise: null
 };
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.resolve('public')));
+
+function ensureKiwoomEnv() {
+  if (!KIWOOM_APPKEY || !KIWOOM_SECRETKEY) {
+    throw new Error('KIWOOM_APPKEY, KIWOOM_SECRETKEY 환경변수를 설정하세요.');
+  }
+}
 
 function getLoginUsers() {
   const users = [];
@@ -43,8 +53,7 @@ function getLoginUsers() {
           if (user?.id && user?.password) {
             users.push({
               id: String(user.id),
-              password: String(user.password),
-              apiKey: String(user.apiKey || '')
+              password: String(user.password)
             });
           }
         });
@@ -57,46 +66,25 @@ function getLoginUsers() {
   for (let i = 1; i <= 20; i += 1) {
     const id = process.env[`APP_USER_${i}_ID`];
     const password = process.env[`APP_USER_${i}_PW`];
-    const apiKey = process.env[`APP_USER_${i}_APIKEY`] || '';
-    if (id && password) users.push({ id, password, apiKey });
+    if (id && password) users.push({ id, password });
   }
 
   if (process.env.USER_ID && process.env.USER_PW) {
-    users.push({
-      id: process.env.USER_ID,
-      password: process.env.USER_PW,
-      apiKey: process.env.USER_APIKEY || ''
-    });
+    users.push({ id: process.env.USER_ID, password: process.env.USER_PW });
   }
 
   return users;
 }
 
-function validateKiwoomEnv() {
-  const appKey = process.env.KIWOOM_APPKEY || process.env.KIWOOM_APP_KEY;
-  const secretKey = process.env.KIWOOM_SECRETKEY || process.env.KIWOOM_SECRET_KEY;
-  const accountNo = process.env.KIWOOM_ACCOUNT;
-
-  if (!appKey || !secretKey || !accountNo) {
-    throw new Error('KIWOOM_APPKEY, KIWOOM_SECRETKEY, KIWOOM_ACCOUNT 환경변수를 설정하세요.');
-  }
-
-  return { appKey, secretKey, accountNo };
-}
-
-async function getAccessToken() {
-  if (tokenCache.value && Date.now() < tokenCache.expiresAt - 60_000) {
-    return tokenCache.value;
-  }
-
-  const { appKey, secretKey } = validateKiwoomEnv();
+async function issueToken() {
+  ensureKiwoomEnv();
 
   const response = await axios.post(
     `${KIWOOM_BASE_URL}/oauth2/token`,
     {
-      grant_type: 'client_credentials',
-      appkey: appKey,
-      secretkey: secretKey
+      granttype: 'clientcredentials',
+      appkey: KIWOOM_APPKEY,
+      secretkey: KIWOOM_SECRETKEY
     },
     {
       headers: {
@@ -107,14 +95,66 @@ async function getAccessToken() {
     }
   );
 
-  const token = response.data?.token || response.data?.access_token;
-  const expiresIn = Number(response.data?.expires_in || 3600);
+  const token = response.data?.token;
+  const expiresAtMs = parseKiwoomExpiresDt(response.data?.expiresdt);
 
-  if (!token) throw new Error('토큰 발급 실패: 응답에 token 값이 없습니다.');
+  if (!token) {
+    throw new Error('Kiwoom 토큰 발급 실패: token이 없습니다.');
+  }
 
-  tokenCache.value = token;
-  tokenCache.expiresAt = Date.now() + expiresIn * 1000;
+  tokenCache.token = token;
+  tokenCache.expiresAtMs = expiresAtMs || Date.now() + 50 * 60 * 1000;
+
   return token;
+}
+
+async function getAccessToken(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && shouldReuseToken(tokenCache, now)) {
+    return tokenCache.token;
+  }
+
+  if (!forceRefresh && tokenCache.inFlightPromise) {
+    return tokenCache.inFlightPromise;
+  }
+
+  tokenCache.inFlightPromise = issueToken().finally(() => {
+    tokenCache.inFlightPromise = null;
+  });
+
+  return tokenCache.inFlightPromise;
+}
+
+function isAuthError(error) {
+  const status = error?.response?.status;
+  if (status === 401 || status === 403) return true;
+
+  const code = String(error?.response?.data?.return_code || error?.response?.data?.code || '').toLowerCase();
+  const msg = String(error?.response?.data?.msg1 || error?.response?.data?.message || '').toLowerCase();
+  return code.includes('auth') || msg.includes('token') || msg.includes('인증');
+}
+
+async function callKiwoom(config, retryOnAuthError = true) {
+  try {
+    const token = await getAccessToken(false);
+    const response = await axios({
+      ...config,
+      baseURL: KIWOOM_BASE_URL,
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.headers || {}),
+        Authorization: `Bearer ${token}`
+      }
+    });
+    return response;
+  } catch (error) {
+    if (retryOnAuthError && isAuthError(error)) {
+      await getAccessToken(true);
+      return callKiwoom(config, false);
+    }
+    throw error;
+  }
 }
 
 function normalizeBalancePayload(raw) {
@@ -141,7 +181,7 @@ function normalizeBalancePayload(raw) {
 
 app.post('/api/auth/login', (req, res) => {
   try {
-    const { id, password, apiKey } = req.body || {};
+    const { id, password } = req.body || {};
     if (!id || !password) {
       return res.status(400).json({ ok: false, message: '아이디/비밀번호를 입력하세요.' });
     }
@@ -151,11 +191,7 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(500).json({ ok: false, message: '서버 로그인 계정 설정이 없습니다.' });
     }
 
-    const found = users.find((user) => {
-      if (user.id !== id || user.password !== password) return false;
-      if (!user.apiKey) return true;
-      return user.apiKey === String(apiKey || '');
-    });
+    const found = users.find((user) => user.id === id && user.password === password);
 
     if (!found) {
       return res.status(401).json({ ok: false, message: '로그인 정보가 올바르지 않습니다.' });
@@ -167,35 +203,68 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
-app.get('/api/kiwoom/search', (req, res) => {
-  const q = String(req.query.q || '').trim().toLowerCase();
-  if (!q) return res.json({ ok: true, items: [] });
+app.get('/api/symbols', (req, res) => {
+  const query = String(req.query.query || '').trim().toLowerCase();
+  if (!query) return res.json([]);
 
-  const items = STOCK_MASTER.filter((item) =>
-    item.name.toLowerCase().includes(q) || item.code.includes(q)
-  ).slice(0, 20);
+  const items = STOCK_MASTER
+    .filter((item) => item.name.toLowerCase().includes(query))
+    .slice(0, 20)
+    .map((item) => ({ name: item.name, code: item.code }));
 
-  return res.json({ ok: true, items });
+  return res.json(items);
 });
 
-app.get('/api/kiwoom/quote', async (req, res) => {
+app.get('/api/accounts', async (req, res) => {
+  try {
+    const response = await callKiwoom({
+      method: 'POST',
+      url: '/api/dostk/acnt',
+      headers: { 'api-id': 'ka00001' },
+      data: {}
+    });
+
+    const raw = response.data;
+    const list = [];
+
+    const candidates = [raw?.output, raw?.output1, raw?.acntList, raw?.items].filter(Array.isArray);
+    candidates.forEach((rows) => {
+      rows.forEach((row) => {
+        const acctNo = String(row?.acctNo || row?.acnt_no || row?.accountNo || '').trim();
+        if (!acctNo) return;
+        const broker = String(row?.brkNm || row?.broker || '키움증권').trim();
+        if (!list.some((item) => item.accountNo === acctNo)) {
+          list.push({ accountNo: acctNo, broker });
+        }
+      });
+    });
+
+    if (!list.length && process.env.KIWOOM_ACCOUNT) {
+      list.push({ accountNo: process.env.KIWOOM_ACCOUNT, broker: '키움증권' });
+    }
+
+    return res.json({ ok: true, accounts: list });
+  } catch (error) {
+    if (process.env.KIWOOM_ACCOUNT) {
+      return res.json({ ok: true, accounts: [{ accountNo: process.env.KIWOOM_ACCOUNT, broker: '키움증권' }] });
+    }
+    return res.status(502).json({ ok: false, message: '계좌 목록을 불러오지 못했습니다.', accounts: [] });
+  }
+});
+
+app.get('/api/quote', async (req, res) => {
   try {
     const code = String(req.query.code || '').trim();
     if (!code) return res.status(400).json({ ok: false, message: '종목코드가 필요합니다.' });
 
-    const token = await getAccessToken();
-
-    const response = await axios.get(`${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price`, {
+    const response = await callKiwoom({
+      method: 'GET',
+      url: '/uapi/domestic-stock/v1/quotations/inquire-price',
+      headers: { 'api-id': 'ka10002' },
       params: {
         fid_cond_mrkt_div_code: 'J',
         fid_input_iscd: code
-      },
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'api-id': 'ka10002'
-      },
-      timeout: 10000
+      }
     });
 
     const out = response.data?.output || {};
@@ -212,41 +281,33 @@ app.get('/api/kiwoom/quote', async (req, res) => {
         changeRateText: `${sign}${changeRate.toFixed(2)}%`
       }
     });
-  } catch (error) {
+  } catch {
     return res.status(502).json({ ok: false, message: '시세를 불러올 수 없습니다.' });
   }
 });
 
-app.get('/api/kiwoom/balance', async (req, res) => {
+app.get('/api/balance', async (req, res) => {
   try {
-    const token = await getAccessToken();
-    const { accountNo } = validateKiwoomEnv();
+    const accountNo = String(req.query.accountNo || '').trim();
+    if (!accountNo) {
+      return res.status(400).json({ ok: false, message: '계좌번호를 선택하세요.', summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] });
+    }
 
-    const response = await axios.post(
-      `${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance`,
-      {
+    const response = await callKiwoom({
+      method: 'POST',
+      url: '/uapi/domestic-stock/v1/trading/inquire-balance',
+      headers: { 'api-id': 'ka01690' },
+      data: {
         account_no: accountNo,
         cont_yn: 'N',
         next_key: ''
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'api-id': 'ka01690'
-        },
-        timeout: 10000
       }
-    );
+    });
 
     const normalized = normalizeBalancePayload(response.data);
 
-    return res.json({
-      ok: true,
-      summary: normalized.summary,
-      items: normalized.items
-    });
-  } catch (error) {
+    return res.json({ ok: true, summary: normalized.summary, items: normalized.items });
+  } catch {
     return res.status(502).json({
       ok: false,
       message: '데이터를 불러올 수 없습니다',
@@ -256,37 +317,28 @@ app.get('/api/kiwoom/balance', async (req, res) => {
   }
 });
 
-app.post('/api/kiwoom/order', async (req, res) => {
+app.post('/api/order', async (req, res) => {
   try {
-    const { symbol, qty, side } = req.body || {};
-    if (!symbol || !qty || !side) {
+    const { symbol, qty, side, accountNo } = req.body || {};
+    if (!symbol || !qty || !side || !accountNo) {
       return res.status(400).json({ ok: false, message: '주문 파라미터가 부족합니다.' });
     }
 
-    const token = await getAccessToken();
-    const { accountNo } = validateKiwoomEnv();
-
-    const response = await axios.post(
-      `${KIWOOM_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash`,
-      {
-        account_no: accountNo,
+    const response = await callKiwoom({
+      method: 'POST',
+      url: '/uapi/domestic-stock/v1/trading/order-cash',
+      headers: { 'api-id': 'kt10000' },
+      data: {
+        account_no: String(accountNo),
         pdno: String(symbol),
         ord_qty: String(qty),
         ord_dvsn: '01',
         trde_tp: side === 'buy' ? '2' : '1'
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'api-id': 'kt10000'
-        },
-        timeout: 10000
       }
-    );
+    });
 
-    return res.json({ ok: true, message: response.data?.msg1 || '주문 요청 완료', raw: response.data });
-  } catch (error) {
+    return res.json({ ok: true, message: response.data?.msg1 || '주문 요청 완료' });
+  } catch {
     return res.status(502).json({ ok: false, message: '주문 요청에 실패했습니다.' });
   }
 });

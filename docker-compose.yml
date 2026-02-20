@@ -11,15 +11,11 @@ services:
       KIWOOM_BASE_URL: ${KIWOOM_BASE_URL:-https://api.kiwoom.com}
       KIWOOM_APPKEY: ${KIWOOM_APPKEY:-REPLACE_WITH_APPKEY}
       KIWOOM_SECRETKEY: ${KIWOOM_SECRETKEY:-REPLACE_WITH_SECRETKEY}
-      KIWOOM_ACCOUNT: ${KIWOOM_ACCOUNT:-REPLACE_WITH_ACCOUNT}
       USER_ID: ${USER_ID:-admin}
       USER_PW: ${USER_PW:-change-me}
-      USER_APIKEY: ${USER_APIKEY:-change-me-api-key}
       APP_USER_1_ID: ${APP_USER_1_ID:-}
       APP_USER_1_PW: ${APP_USER_1_PW:-}
-      APP_USER_1_APIKEY: ${APP_USER_1_APIKEY:-}
       APP_USER_2_ID: ${APP_USER_2_ID:-}
       APP_USER_2_PW: ${APP_USER_2_PW:-}
-      APP_USER_2_APIKEY: ${APP_USER_2_APIKEY:-}
       APP_USERS_JSON: ${APP_USERS_JSON:-}
     restart: unless-stopped
