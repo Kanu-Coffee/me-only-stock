@@ -1,14 +1,30 @@
+const ACCOUNT_STORAGE_KEY = 'me-only-stock:selected-account';
+const RECENT_SYMBOLS_KEY = 'me-only-stock:recent-symbols';
+const RECENT_SEARCHES_KEY = 'me-only-stock:recent-searches';
+const AUTH_TOKEN_KEY = 'me-only-stock:access-token';
+const AUTH_USER_ID_KEY = 'me-only-stock:user-id';
+
 const state = {
   tab: 'home',
-  isLoggedIn: false,
-  selectedBroker: 'kiwoom',
-  auth: { id: '', password: '', apiKey: '' },
+  isLoggedIn: Boolean(localStorage.getItem(AUTH_TOKEN_KEY)),
+  authToken: localStorage.getItem(AUTH_TOKEN_KEY) || '',
+  auth: { id: localStorage.getItem(AUTH_USER_ID_KEY) || '', password: '' },
+  accounts: [],
+  selectedAccountNo: localStorage.getItem(ACCOUNT_STORAGE_KEY) || '',
   balance: { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] },
   quote: null,
   selectedStock: null,
-  searchItems: [],
   qty: 1,
-  side: 'buy'
+  side: 'buy',
+  modal: {
+    open: false,
+    query: '',
+    items: [],
+    loading: false,
+    error: ''
+  },
+  recentSymbols: JSON.parse(localStorage.getItem(RECENT_SYMBOLS_KEY) || '[]'),
+  recentSearches: JSON.parse(localStorage.getItem(RECENT_SEARCHES_KEY) || '[]')
 };
 
 const ui = {
@@ -21,7 +37,9 @@ ui.tabs.forEach((button) => {
   button.addEventListener('click', () => {
     state.tab = button.dataset.tab;
     render();
-    if (state.tab === 'balance') loadBalance();
+    if (state.tab === 'balance' && state.isLoggedIn) {
+      loadAccounts().then(loadBalance);
+    }
   });
 });
 
@@ -43,6 +61,62 @@ function showAlert(message) {
   window.alert(message);
 }
 
+function persistRecentSymbols(next) {
+  state.recentSymbols = next.slice(0, 5);
+  localStorage.setItem(RECENT_SYMBOLS_KEY, JSON.stringify(state.recentSymbols));
+}
+
+function persistRecentSearches(query) {
+  if (!query) return;
+  const deduped = [query, ...state.recentSearches.filter((item) => item !== query)].slice(0, 5);
+  state.recentSearches = deduped;
+  localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(deduped));
+}
+
+function saveSelectedAccount(accountNo) {
+  state.selectedAccountNo = accountNo;
+  localStorage.setItem(ACCOUNT_STORAGE_KEY, accountNo);
+}
+
+function logoutToHome() {
+  state.isLoggedIn = false;
+  state.authToken = '';
+  state.accounts = [];
+  state.selectedAccountNo = '';
+  state.balance = { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] };
+  state.quote = null;
+  state.selectedStock = null;
+  state.tab = 'home';
+
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(ACCOUNT_STORAGE_KEY);
+
+  setStatus('로그인이 필요합니다.');
+  render();
+}
+
+async function authFetch(url, options = {}) {
+  const headers = {
+    ...(options.headers || {})
+  };
+
+  if (state.authToken) {
+    headers.Authorization = `Bearer ${state.authToken}`;
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers
+  });
+
+  if (response.status === 401) {
+    logoutToHome();
+    throw new Error('UNAUTHORIZED');
+  }
+
+  return response;
+}
+
 function render() {
   setTabActive();
 
@@ -57,24 +131,13 @@ function renderHome() {
       <h2>앱 로그인</h2>
       <label>아이디<input id="idInput" value="${state.auth.id}" placeholder="아이디" /></label>
       <label>비밀번호<input id="pwInput" type="password" value="${state.auth.password}" placeholder="비밀번호" /></label>
-      <label>API Key(선택/정책필수)<input id="apiInput" value="${state.auth.apiKey}" placeholder="사용자 API Key" /></label>
       <button class="btn-primary" id="loginBtn">로그인</button>
       <p class="muted">로그인 후 하단 탭에서 잔고/주문으로 이동하세요.</p>
-    </section>
-
-    <section class="card">
-      <h2>증권사</h2>
-      <button class="btn-secondary" id="brokerKiwoom">키움증권 사용</button>
     </section>
   `;
 
   document.getElementById('idInput').addEventListener('input', (e) => (state.auth.id = e.target.value));
   document.getElementById('pwInput').addEventListener('input', (e) => (state.auth.password = e.target.value));
-  document.getElementById('apiInput').addEventListener('input', (e) => (state.auth.apiKey = e.target.value));
-  document.getElementById('brokerKiwoom').addEventListener('click', () => {
-    state.selectedBroker = 'kiwoom';
-    setStatus('키움증권 선택됨');
-  });
   document.getElementById('loginBtn').addEventListener('click', login);
 }
 
@@ -87,19 +150,46 @@ async function login() {
     });
     const json = await response.json();
 
-    if (!response.ok || !json.ok) {
+    if (!response.ok || !json.ok || !json.accessToken) {
       showAlert(json.message || '로그인 실패');
       return;
     }
 
     state.isLoggedIn = true;
+    state.authToken = json.accessToken;
+
+    localStorage.setItem(AUTH_TOKEN_KEY, json.accessToken);
+    localStorage.setItem(AUTH_USER_ID_KEY, json.user.id);
+
     setStatus(`${json.user.id} 님 로그인됨`);
     state.tab = 'balance';
     render();
-    loadBalance();
+    await loadAccounts();
+    await loadBalance();
   } catch {
     showAlert('로그인 중 네트워크 오류가 발생했습니다.');
   }
+}
+
+function renderAccountSelector() {
+  const options = state.accounts
+    .map(
+      (account) =>
+        `<option value="${account.accountNo}" ${account.accountNo === state.selectedAccountNo ? 'selected' : ''}>${account.broker} · ${account.accountNo}</option>`
+    )
+    .join('');
+
+  return `
+    <section class="card">
+      <h2>계좌 선택</h2>
+      <label>
+        잔고 조회 계좌
+        <select id="accountSelect" ${!state.accounts.length ? 'disabled' : ''}>
+          ${options || '<option value="">사용 가능한 계좌 없음</option>'}
+        </select>
+      </label>
+    </section>
+  `;
 }
 
 function renderBalance() {
@@ -118,6 +208,7 @@ function renderBalance() {
     : '<p class="muted">보유 종목이 없습니다.</p>';
 
   ui.container.innerHTML = `
+    ${renderAccountSelector()}
     <section class="summary">
       <article class="card">
         <span>총 자산</span>
@@ -138,7 +229,44 @@ function renderBalance() {
     </section>
   `;
 
+  const accountSelect = document.getElementById('accountSelect');
+  if (accountSelect) {
+    accountSelect.addEventListener('change', async (event) => {
+      saveSelectedAccount(event.target.value);
+      await loadBalance();
+    });
+  }
+
   document.getElementById('refreshBalance').addEventListener('click', loadBalance);
+}
+
+async function loadAccounts() {
+  if (!state.isLoggedIn) return;
+
+  try {
+    const response = await authFetch('/api/accounts');
+    const json = await response.json();
+
+    if (!response.ok || !json.ok) {
+      showAlert(json.message || '계좌 목록을 불러오지 못했습니다.');
+      return;
+    }
+
+    state.accounts = Array.isArray(json.accounts) ? json.accounts : [];
+
+    if (!state.accounts.find((account) => account.accountNo === state.selectedAccountNo)) {
+      const fallback = state.accounts[0]?.accountNo || '';
+      saveSelectedAccount(fallback);
+    }
+
+    if (state.tab === 'balance') {
+      renderBalance();
+    }
+  } catch (error) {
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('계좌 목록을 불러오지 못했습니다.');
+    }
+  }
 }
 
 async function loadBalance() {
@@ -147,13 +275,19 @@ async function loadBalance() {
     return;
   }
 
+  if (!state.selectedAccountNo) {
+    state.balance = { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] };
+    if (state.tab === 'balance') renderBalance();
+    return;
+  }
+
   try {
-    const response = await fetch('/api/kiwoom/balance');
+    const response = await authFetch(`/api/balance?accountNo=${encodeURIComponent(state.selectedAccountNo)}`);
     const json = await response.json();
 
     if (!response.ok || !json.ok) {
       state.balance = { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] };
-      renderBalance();
+      if (state.tab === 'balance') renderBalance();
       showAlert(json.message || '데이터를 불러올 수 없습니다');
       return;
     }
@@ -164,40 +298,100 @@ async function loadBalance() {
     };
 
     if (state.tab === 'balance') renderBalance();
-  } catch {
+  } catch (error) {
     state.balance = { summary: { totalAsset: 0, totalReturnRate: 0 }, items: [] };
     if (state.tab === 'balance') renderBalance();
-    showAlert('데이터를 불러올 수 없습니다');
+
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('데이터를 불러올 수 없습니다');
+    }
   }
+}
+
+function renderRecentList() {
+  const recentSymbols = state.recentSymbols
+    .map((item) => `<button class="search-item" data-code="${item.code}" data-name="${item.name}">${item.name}</button>`)
+    .join('');
+  const recentSearches = state.recentSearches
+    .map((query) => `<button class="tag-btn" data-query="${query}">${query}</button>`)
+    .join('');
+
+  return `
+    <div class="recent-block">
+      <h4>최근 검색어</h4>
+      <div class="tag-list">${recentSearches || '<span class="muted">없음</span>'}</div>
+      <h4>최근 선택 종목</h4>
+      <div class="search-results">${recentSymbols || '<span class="muted">없음</span>'}</div>
+    </div>
+  `;
+}
+
+function renderSearchModal() {
+  if (!state.modal.open) return '';
+
+  const listHtml = state.modal.items.length
+    ? state.modal.items
+        .map((item) => `<button class="search-item" data-code="${item.code}" data-name="${item.name}">${item.name}</button>`)
+        .join('')
+    : '<p class="muted">검색 결과가 없습니다.</p>';
+
+  return `
+    <div class="modal-backdrop" id="searchModalBackdrop">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>종목 검색</h3>
+          <button class="icon-btn" id="closeSearchModal">닫기</button>
+        </div>
+        <label>
+          종목명
+          <input id="modalSearchInput" placeholder="예: 삼성전자" value="${state.modal.query}" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn-primary" id="modalSearchBtn">검색</button>
+        </div>
+        ${renderRecentList()}
+        ${state.modal.loading ? '<p class="muted">검색 중...</p>' : ''}
+        ${state.modal.error ? `<p class="error">${state.modal.error}</p>` : ''}
+        <div class="search-results">${listHtml}</div>
+      </div>
+    </div>
+  `;
 }
 
 function renderOrder() {
   const quoteHtml = state.quote
     ? `
       <div class="card quote-box">
-        <div class="muted">${state.selectedStock?.name || ''} (${state.selectedStock?.code || ''})</div>
+        <div class="muted">${state.selectedStock?.name || ''}</div>
         <strong>${money(state.quote.currentPrice)}원</strong>
         <div class="${Number(state.quote.changeRate) >= 0 ? 'up' : 'down'}">${state.quote.changeRateText}</div>
       </div>
     `
-    : '<p class="muted">종목을 선택하면 현재가/등락률을 보여줍니다.</p>';
-
-  const searchHtml = state.searchItems
-    .map(
-      (item) =>
-        `<button class="search-item" data-code="${item.code}" data-name="${item.name}">${item.name} (${item.code})</button>`
-    )
-    .join('');
+    : '<p class="muted">종목 검색에서 종목명을 선택하세요.</p>';
 
   ui.container.innerHTML = `
     <section class="card">
       <h2>빠른 주문</h2>
-      <label>종목 검색<input id="searchInput" placeholder="예: 삼성, 하이닉스, 005930" /></label>
-      <div class="search-results">${searchHtml}</div>
+      <label>주문 계좌
+        <select id="orderAccountSelect" ${!state.accounts.length ? 'disabled' : ''}>
+          ${state.accounts
+            .map(
+              (account) =>
+                `<option value="${account.accountNo}" ${account.accountNo === state.selectedAccountNo ? 'selected' : ''}>${account.broker} · ${account.accountNo}</option>`
+            )
+            .join('')}
+        </select>
+      </label>
+      <div class="selected-stock-box">
+        <div>
+          <div class="muted">선택 종목</div>
+          <strong>${state.selectedStock?.name || '선택 안됨'}</strong>
+        </div>
+        <button class="btn-secondary" id="openSearchModal">종목 검색</button>
+      </div>
       ${quoteHtml}
 
       <div class="card">
-        <label>종목코드<input id="codeInput" value="${state.selectedStock?.code || ''}" placeholder="종목 선택 시 자동입력" /></label>
         <div class="qty">
           <button id="qtyMinus">-</button>
           <div>${state.qty}주</div>
@@ -210,27 +404,29 @@ function renderOrder() {
         <button class="btn-primary" id="orderBtn">시장가 즉시 주문</button>
       </div>
     </section>
+    ${renderSearchModal()}
   `;
 
-  document.getElementById('searchInput').addEventListener('input', onSearchInput);
-
-  ui.container.querySelectorAll('.search-item').forEach((button) => {
-    button.addEventListener('click', () => {
-      const stock = { code: button.dataset.code, name: button.dataset.name };
-      state.selectedStock = stock;
-      state.searchItems = [];
-      loadQuote(stock.code);
+  const orderAccountSelect = document.getElementById('orderAccountSelect');
+  if (orderAccountSelect) {
+    orderAccountSelect.addEventListener('change', (event) => {
+      saveSelectedAccount(event.target.value);
     });
-  });
+  }
 
-  document.getElementById('codeInput').addEventListener('input', (e) => {
-    state.selectedStock = { code: e.target.value, name: '선택 종목' };
+  document.getElementById('openSearchModal').addEventListener('click', () => {
+    state.modal.open = true;
+    state.modal.items = [];
+    state.modal.error = '';
+    renderOrder();
+    bindModalEvents();
   });
 
   document.getElementById('qtyMinus').addEventListener('click', () => {
     state.qty = Math.max(1, state.qty - 1);
     renderOrder();
   });
+
   document.getElementById('qtyPlus').addEventListener('click', () => {
     state.qty += 1;
     renderOrder();
@@ -240,36 +436,101 @@ function renderOrder() {
     state.side = 'buy';
     renderOrder();
   });
+
   document.getElementById('sellBtn').addEventListener('click', () => {
     state.side = 'sell';
     renderOrder();
   });
 
   document.getElementById('orderBtn').addEventListener('click', placeOrder);
+
+  if (state.modal.open) {
+    bindModalEvents();
+  }
 }
 
-let searchTimer = null;
-function onSearchInput(event) {
-  const q = event.target.value.trim();
-  clearTimeout(searchTimer);
-
-  searchTimer = setTimeout(async () => {
-    if (!q) {
-      state.searchItems = [];
-      renderOrder();
-      return;
-    }
-
-    const response = await fetch(`/api/kiwoom/search?q=${encodeURIComponent(q)}`);
-    const json = await response.json();
-    state.searchItems = json.items || [];
+function bindModalEvents() {
+  document.getElementById('closeSearchModal')?.addEventListener('click', () => {
+    state.modal.open = false;
     renderOrder();
-  }, 250);
+  });
+
+  document.getElementById('searchModalBackdrop')?.addEventListener('click', (event) => {
+    if (event.target.id === 'searchModalBackdrop') {
+      state.modal.open = false;
+      renderOrder();
+    }
+  });
+
+  const searchInput = document.getElementById('modalSearchInput');
+  const searchButton = document.getElementById('modalSearchBtn');
+
+  if (searchInput) {
+    searchInput.addEventListener('input', (event) => {
+      state.modal.query = event.target.value;
+    });
+
+    searchInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        searchSymbols();
+      }
+    });
+  }
+
+  searchButton?.addEventListener('click', searchSymbols);
+
+  ui.container.querySelectorAll('.search-item').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const stock = { code: button.dataset.code, name: button.dataset.name };
+      state.selectedStock = stock;
+      persistRecentSymbols([stock, ...state.recentSymbols.filter((item) => item.code !== stock.code)]);
+      state.modal.open = false;
+      state.modal.items = [];
+      await loadQuote(stock.code);
+    });
+  });
+
+  ui.container.querySelectorAll('.tag-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.modal.query = button.dataset.query;
+      searchSymbols();
+    });
+  });
+}
+
+async function searchSymbols() {
+  const query = state.modal.query.trim();
+  if (!query) {
+    state.modal.items = [];
+    state.modal.error = '종목명을 입력하세요.';
+    renderOrder();
+    return;
+  }
+
+  state.modal.loading = true;
+  state.modal.error = '';
+  renderOrder();
+
+  try {
+    const response = await authFetch(`/api/symbols?query=${encodeURIComponent(query)}`);
+    const items = await response.json();
+    state.modal.items = Array.isArray(items) ? items : [];
+    persistRecentSearches(query);
+  } catch (error) {
+    state.modal.items = [];
+    if (error.message !== 'UNAUTHORIZED') {
+      state.modal.error = '검색에 실패했습니다.';
+    }
+  } finally {
+    state.modal.loading = false;
+    renderOrder();
+  }
 }
 
 async function loadQuote(code) {
   try {
-    const response = await fetch(`/api/kiwoom/quote?code=${encodeURIComponent(code)}`);
+    const response = await authFetch(`/api/quote?code=${encodeURIComponent(code)}`);
     const json = await response.json();
 
     if (!response.ok || !json.ok) {
@@ -279,8 +540,10 @@ async function loadQuote(code) {
 
     state.quote = json.quote;
     renderOrder();
-  } catch {
-    showAlert('시세를 불러올 수 없습니다.');
+  } catch (error) {
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('시세를 불러올 수 없습니다.');
+    }
   }
 }
 
@@ -296,11 +559,16 @@ async function placeOrder() {
     return;
   }
 
+  if (!state.selectedAccountNo) {
+    showAlert('주문 계좌를 선택하세요.');
+    return;
+  }
+
   try {
-    const response = await fetch('/api/kiwoom/order', {
+    const response = await authFetch('/api/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, qty: state.qty, side: state.side })
+      body: JSON.stringify({ symbol, qty: state.qty, side: state.side, accountNo: state.selectedAccountNo })
     });
     const json = await response.json();
 
@@ -310,9 +578,18 @@ async function placeOrder() {
     }
 
     showAlert(json.message || '주문 요청 완료');
-  } catch {
-    showAlert('주문 요청에 실패했습니다.');
+  } catch (error) {
+    if (error.message !== 'UNAUTHORIZED') {
+      showAlert('주문 요청에 실패했습니다.');
+    }
   }
 }
 
 render();
+
+if (state.isLoggedIn) {
+  setStatus('자동 로그인 상태입니다.');
+  state.tab = 'balance';
+  render();
+  loadAccounts().then(loadBalance);
+}
