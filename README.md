@@ -15,7 +15,7 @@ npm start
 ## Docker Compose 사용법
 ```bash
 # Portainer처럼 .env 없이도 환경변수만 주입 가능
-docker compose up -d --build
+docker compose up -d
 ```
 
 ## 환경변수
@@ -57,6 +57,12 @@ APP_USERS_JSON=[
 ## 프론트 동작
 - JWT를 localStorage에 저장하고, 모든 API 요청에 Bearer 헤더를 자동 추가합니다.
 - API가 401을 반환하면 자동 로그아웃 후 홈(로그인)으로 이동합니다.
+
+
+## CI/CD (GHCR 자동 배포)
+- `.github/workflows/docker-publish.yml`는 `main` 브랜치 push 시 이미지를 빌드해 아래 태그로 푸시합니다.
+  - `ghcr.io/kanu-coffee/me-only-stock:latest`
+- Portainer Web editor에서는 `docker-compose.yml`을 그대로 붙여넣고 Deploy하면 `build` 없이 이미지를 pull해서 실행할 수 있습니다.
 
 ## 테스트
 ```bash

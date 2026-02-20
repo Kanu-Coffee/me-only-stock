@@ -1,8 +1,6 @@
 services:
   me-only-stock:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/kanu-coffee/me-only-stock:latest
     container_name: me-only-stock
     ports:
       - "${HOST_PORT:-3259}:${PORT:-3259}"

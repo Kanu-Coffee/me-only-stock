@@ -32,16 +32,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.resolve('public')));
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.resolve('public')));
-
-function ensureKiwoomEnv() {
-  if (!KIWOOM_APPKEY || !KIWOOM_SECRETKEY) {
-    throw new Error('KIWOOM_APPKEY, KIWOOM_SECRETKEY 환경변수를 설정하세요.');
-  }
-}
-
 function getLoginUsers() {
   const users = [];
 
