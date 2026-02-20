@@ -2,7 +2,8 @@
 
 ## 개요
 - `server.js` + `public/` 정적 파일 기반으로 동작하는 모바일 주식 주문 웹앱입니다.
-- 기본 포트는 `3259`이며 Docker Compose에서 포트를 자유롭게 변경할 수 있습니다.
+- Kiwoom 인증/호출은 **서버에서만** 수행하며, 프론트는 `/api/*` 엔드포인트만 호출합니다.
+- 기본 포트는 `3259`이며 Docker Compose에서 외부 포트를 변경할 수 있습니다.
 
 ## 실행
 ```bash
@@ -27,35 +28,39 @@ HOST_PORT=9001
 ```
 
 ## 환경변수
-### 키움 REST
+### Kiwoom REST (필수)
 - `KIWOOM_BASE_URL` (기본: `https://api.kiwoom.com`)
 - `KIWOOM_APPKEY`
 - `KIWOOM_SECRETKEY`
-- `KIWOOM_ACCOUNT`
 
-### 앱 로그인 (단일)
-- `USER_ID`
-- `USER_PW`
-- `USER_APIKEY` (선택)
+> 보안 정책: API 키/시크릿/토큰은 프론트로 내려가지 않으며, 브라우저 저장소에 저장되지 않습니다.
 
-### 앱 로그인 (다중)
-- `APP_USER_1_ID`, `APP_USER_1_PW`, `APP_USER_1_APIKEY`
-- `APP_USER_2_ID`, `APP_USER_2_PW`, `APP_USER_2_APIKEY`
-- 또는 `APP_USERS_JSON` 사용
+### 앱 로그인
+- 단일: `USER_ID`, `USER_PW`
+- 다중: `APP_USER_1_ID`, `APP_USER_1_PW` ... 또는 `APP_USERS_JSON`
 
 예시:
 ```env
-APP_USERS_JSON=[{"id":"alice","password":"alice-pass","apiKey":"alice-key"},{"id":"bob","password":"bob-pass"}]
+APP_USERS_JSON=[{"id":"alice","password":"alice-pass"},{"id":"bob","password":"bob-pass"}]
 ```
 
 ## 주요 API
 - `POST /api/auth/login` 로그인
-- `GET /api/kiwoom/balance` 잔고조회(ka01690)
-- `GET /api/kiwoom/quote?code=005930` 현재가/등락률(ka10002)
-- `GET /api/kiwoom/search?q=삼성` 종목 검색
-- `POST /api/kiwoom/order` 주문(kt10000)
+- `GET /api/accounts` 계좌 목록 조회 (ka00001 기반)
+- `GET /api/symbols?query=삼성` 종목 검색 (종목명 기반)
+- `GET /api/quote?code=005930` 현재가/등락률 (ka10002)
+- `GET /api/balance?accountNo=12345678` 잔고 조회 (ka01690)
+- `POST /api/order` 주문 (kt10000)
 
-## 프론트 파일
-- `public/index.html` : 하단 탭 네비게이션 포함
-- `public/app.js` : SPA 상태 전환/검색/시세/주문 로직
-- `public/style.css` : 모바일 최적화 스타일
+## UX 변경 사항
+- 홈 로그인 화면에서 API Key 입력을 제거했습니다.
+- 주문 탭은 **종목 검색 모달**(입력 + 검색 버튼/엔터 + 결과 선택) 방식입니다.
+- 사용자에게는 종목명 중심 UI를 제공하고 내부적으로만 종목코드를 사용합니다.
+- 잔고 탭 상단에서 계좌번호(및 증권사 라벨)를 선택할 수 있습니다.
+- 마지막 선택 계좌/최근 검색어/최근 선택 종목은 로컬 저장소에 저장됩니다.
+
+## 테스트
+```bash
+npm test
+```
+- `server/kiwoom/tokenManager.test.js`에서 토큰 만료 파싱/캐시 재사용 로직을 검증합니다.
