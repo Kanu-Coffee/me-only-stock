@@ -1,48 +1,61 @@
-# 내 주식 주문 PWA (실전 모드)
+# me-only-stock (모바일 웹/PWA 스타일 단일 서버)
 
-키움 OpenAPI(REST) 실전 도메인(`https://api.kiwoom.com`)을 사용하는 모바일 퍼스트 주문 웹앱입니다.
+## 개요
+- `server.js` + `public/` 정적 파일 기반으로 동작하는 모바일 주식 주문 웹앱입니다.
+- 기본 포트는 `3259`이며 Docker Compose에서 포트를 자유롭게 변경할 수 있습니다.
 
-## 1) 핵심 변경점
-
-- Docker `environment` 값으로 실전 키 주입
-- 백엔드가 `process.env.KIWOOM_APPKEY`, `process.env.KIWOOM_SECRETKEY`, `process.env.KIWOOM_ACCOUNT`를 직접 사용
-- 앱 로그인은 `USER_ID`, `USER_PW` 기반 검증
-- 루트 `server.js`를 컨테이너 진입점으로 사용
-
-## 2) 필수 환경변수
-
-```env
-PORT=4000
-NODE_ENV=production
-KIWOOM_BASE_URL=https://api.kiwoom.com
-USER_ID=your_app_user_id
-USER_PW=your_app_user_password
-KIWOOM_APPKEY=your_kiwoom_appkey
-KIWOOM_SECRETKEY=your_kiwoom_secretkey
-KIWOOM_ACCOUNT=1234567890
+## 실행
+```bash
+cp .env.example .env
+npm install
+npm start
 ```
 
-## 3) Portainer 배포
-
-`docker-compose.yml`의 environment 값만 실제 값으로 변경 후 스택 배포:
-
+## Docker Compose 사용법
 ```bash
+cp .env.example .env
 docker compose up -d --build
 ```
 
-## 4) API 흐름
+### 포트 변경
+- 내부 포트: `PORT`
+- 외부 포트: `HOST_PORT`
+- 예) 외부 9001 사용
+```env
+PORT=3259
+HOST_PORT=9001
+```
 
-- 토큰 발급: `au10001`
-- 잔고 조회: `ka01690`
-- 주문 요청: `kt10000`
+## 환경변수
+### 키움 REST
+- `KIWOOM_BASE_URL` (기본: `https://api.kiwoom.com`)
+- `KIWOOM_APPKEY`
+- `KIWOOM_SECRETKEY`
+- `KIWOOM_ACCOUNT`
 
-백엔드 파일:
+### 앱 로그인 (단일)
+- `USER_ID`
+- `USER_PW`
+- `USER_APIKEY` (선택)
 
-- 루트 진입점: `server.js`
-- 앱 구성: `server/app.js`
-- 키움 클라이언트: `server/brokers/kiwoom/client.js`
-- 라우팅: `server/routes/auth.js`, `server/routes/brokers.js`
+### 앱 로그인 (다중)
+- `APP_USER_1_ID`, `APP_USER_1_PW`, `APP_USER_1_APIKEY`
+- `APP_USER_2_ID`, `APP_USER_2_PW`, `APP_USER_2_APIKEY`
+- 또는 `APP_USERS_JSON` 사용
 
-## 5) 주의
+예시:
+```env
+APP_USERS_JSON=[{"id":"alice","password":"alice-pass","apiKey":"alice-key"},{"id":"bob","password":"bob-pass"}]
+```
 
-실전 주문이므로 반드시 소액/모의 검증 후 사용하세요.
+## 주요 API
+- `POST /api/auth/login` 로그인
+- `GET /api/kiwoom/balance` 잔고조회(ka01690)
+- `GET /api/kiwoom/quote?code=005930` 현재가/등락률(ka10002)
+- `GET /api/kiwoom/search?q=삼성` 종목 검색
+- `POST /api/kiwoom/order` 주문(kt10000)
+
+## 프론트 파일
+- `public/index.html` : 하단 탭 네비게이션 포함
+- `public/app.js` : SPA 상태 전환/검색/시세/주문 로직
+- `public/style.css` : 모바일 최적화 스타일
