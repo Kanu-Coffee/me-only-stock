@@ -2,7 +2,8 @@
 
 ## 개요
 - `server.js` + `public/` 정적 파일 기반으로 동작하는 모바일 주식 주문 웹앱입니다.
-- 기본 포트는 `3259`이며 Docker Compose에서 포트를 자유롭게 변경할 수 있습니다.
+- Kiwoom 인증/호출은 **서버에서만** 수행합니다.
+- JWT 인증(12시간)을 사용하며 `/api/*`는 로그인 후 Bearer 토큰이 필요합니다.
 
 ## 실행
 ```bash
@@ -13,49 +14,58 @@ npm start
 
 ## Docker Compose 사용법
 ```bash
-cp .env.example .env
-docker compose up -d --build
-```
-
-### 포트 변경
-- 내부 포트: `PORT`
-- 외부 포트: `HOST_PORT`
-- 예) 외부 9001 사용
-```env
-PORT=3259
-HOST_PORT=9001
+# Portainer처럼 .env 없이도 환경변수만 주입 가능
+docker compose up -d
 ```
 
 ## 환경변수
-### 키움 REST
+### 필수
 - `KIWOOM_BASE_URL` (기본: `https://api.kiwoom.com`)
-- `KIWOOM_APPKEY`
-- `KIWOOM_SECRETKEY`
-- `KIWOOM_ACCOUNT`
+- `JWT_SECRET` (JWT 서명용)
 
-### 앱 로그인 (단일)
-- `USER_ID`
-- `USER_PW`
-- `USER_APIKEY` (선택)
+### 멀티유저(권장)
+각 앱 사용자마다 Kiwoom 키를 따로 설정합니다.
+- `APP_USER_1_ID`, `APP_USER_1_PW`, `APP_USER_1_APPKEY`, `APP_USER_1_SECRETKEY`, `APP_USER_1_ACCOUNT`
+- `APP_USER_2_ID`, `APP_USER_2_PW`, `APP_USER_2_APPKEY`, `APP_USER_2_SECRETKEY`, `APP_USER_2_ACCOUNT`
+- ...
 
-### 앱 로그인 (다중)
-- `APP_USER_1_ID`, `APP_USER_1_PW`, `APP_USER_1_APIKEY`
-- `APP_USER_2_ID`, `APP_USER_2_PW`, `APP_USER_2_APIKEY`
-- 또는 `APP_USERS_JSON` 사용
-
-예시:
+또는 `APP_USERS_JSON` 사용:
 ```env
-APP_USERS_JSON=[{"id":"alice","password":"alice-pass","apiKey":"alice-key"},{"id":"bob","password":"bob-pass"}]
+APP_USERS_JSON=[
+  {"id":"alice","password":"alice-pass","appkey":"alice-appkey","secretkey":"alice-secret","account":"111122223333"},
+  {"id":"bob","password":"bob-pass","appkey":"bob-appkey","secretkey":"bob-secret","account":"444455556666"}
+]
 ```
 
-## 주요 API
-- `POST /api/auth/login` 로그인
-- `GET /api/kiwoom/balance` 잔고조회(ka01690)
-- `GET /api/kiwoom/quote?code=005930` 현재가/등락률(ka10002)
-- `GET /api/kiwoom/search?q=삼성` 종목 검색
-- `POST /api/kiwoom/order` 주문(kt10000)
+### 단일유저 fallback
+- `USER_ID`, `USER_PW`
+- `KIWOOM_APPKEY`, `KIWOOM_SECRETKEY`, `KIWOOM_ACCOUNT`
 
-## 프론트 파일
-- `public/index.html` : 하단 탭 네비게이션 포함
-- `public/app.js` : SPA 상태 전환/검색/시세/주문 로직
-- `public/style.css` : 모바일 최적화 스타일
+## 보안 원칙
+- appkey/secretkey/Kiwoom access token은 클라이언트로 내려가지 않습니다.
+- JWT payload는 `userId`만 포함합니다.
+- API 응답/로그에 Kiwoom 키나 토큰을 출력하지 않습니다.
+
+## 주요 API
+- `POST /api/auth/login` 로그인 + JWT 발급
+- `GET /api/accounts` 계좌 목록 조회 (ka00001)
+- `GET /api/symbols?query=삼성` 종목 검색
+- `GET /api/quote?code=005930` 현재가 (ka10002)
+- `GET /api/balance?accountNo=...` 잔고 조회 (ka01690)
+- `POST /api/order` 주문 (kt10000)
+
+## 프론트 동작
+- JWT를 localStorage에 저장하고, 모든 API 요청에 Bearer 헤더를 자동 추가합니다.
+- API가 401을 반환하면 자동 로그아웃 후 홈(로그인)으로 이동합니다.
+
+
+## CI/CD (GHCR 자동 배포)
+- `.github/workflows/docker-publish.yml`는 `main` 브랜치 push 시 이미지를 빌드해 아래 태그로 푸시합니다.
+  - `ghcr.io/kanu-coffee/me-only-stock:latest`
+- Portainer Web editor에서는 `docker-compose.yml`을 그대로 붙여넣고 Deploy하면 `build` 없이 이미지를 pull해서 실행할 수 있습니다.
+
+## 테스트
+```bash
+npm test
+node --check server.js && node --check public/app.js
+```

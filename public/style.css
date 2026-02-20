@@ -35,7 +35,7 @@ body {
 }
 
 label { display: block; margin-bottom: 12px; color: #d8e2ff; }
-input {
+input, select {
   width: 100%;
   margin-top: 8px;
   height: 48px;
@@ -48,11 +48,12 @@ input {
 }
 
 button {
-  min-height: 50px;
+  min-height: 46px;
   border: 0;
   border-radius: 12px;
   font-size: 1rem;
   font-weight: 700;
+  cursor: pointer;
 }
 
 .btn-primary { width: 100%; background: var(--primary); color: white; }
@@ -92,10 +93,9 @@ button {
 
 .muted { color: var(--muted); }
 .error { color: #ff9dab; margin-top: 8px; }
-.hidden { display: none; }
 
 .search-results {
-  max-height: 180px;
+  max-height: 220px;
   overflow: auto;
   margin-top: 8px;
 }
@@ -122,3 +122,66 @@ button {
 }
 .qty > div { text-align: center; font-size: 1.2rem; font-weight: 700; }
 .quote-box strong { font-size: 1.5rem; display: block; margin-top: 6px; }
+
+.selected-stock-box {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.selected-stock-box .btn-secondary {
+  width: auto;
+  padding: 0 14px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 16, 0.65);
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  z-index: 20;
+}
+
+.modal-card {
+  width: min(560px, 100%);
+  background: #121e3b;
+  border-radius: 18px 18px 0 0;
+  padding: 16px;
+  max-height: 85vh;
+  overflow: auto;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.icon-btn {
+  min-height: 36px;
+  padding: 0 12px;
+  width: auto;
+  background: #2f406f;
+  color: white;
+}
+
+.tag-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tag-btn {
+  width: auto;
+  min-height: 34px;
+  padding: 0 10px;
+  background: #273b69;
+  color: white;
+  font-size: 0.9rem;
+}
+
+.recent-block h4 {
+  margin: 12px 0 8px;
+}
