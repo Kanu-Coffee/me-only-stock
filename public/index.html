@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <title>내 주식 주문</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="top-header">
+        <h1>내 주식 주문</h1>
+        <p id="statusText">로그인이 필요합니다</p>
+      </header>
+
+      <main id="screenContainer" class="screen-container"></main>
+
+      <nav class="bottom-tab" aria-label="하단 메뉴">
+        <button class="tab-btn active" data-tab="home">홈</button>
+        <button class="tab-btn" data-tab="balance">내 잔고</button>
+        <button class="tab-btn" data-tab="order">주문하기</button>
+      </nav>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
